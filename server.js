@@ -57,6 +57,16 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("startGame", ({ roomId }) => {
+    // ✅ mark room as started in your rooms data
+    if (rooms[roomId]) {
+      rooms[roomId].isStarted = true;
+      io.to(roomId).emit("gameStarted", { roomId });
+      console.log(`🎮 Game started in room ${roomId}`);
+    }
+  });
+
+
   // Handle disconnection
   socket.on("disconnect", () => {
     console.log("❌ Client disconnected:", socket.id);

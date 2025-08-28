@@ -6,7 +6,8 @@ const rooms = {
     time: 60,
     totalRounds: 5,
     players: [{ nickname: "Alice" }],
-    currentRound: 1
+    currentRound: 1,
+    isstarted: false
   }
 }
 
