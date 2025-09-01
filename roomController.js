@@ -1,4 +1,6 @@
-const rooms = require("../data/rooms");
+const rooms = require("./rooms");
+let ioInstance;
+const { runGameLoop } = require("./gameLoop");
 
 // Utility to generate random 6-character room ID
 const generateRoomId = () => {
@@ -71,8 +73,14 @@ exports.joinRoom = (req, res) => {
   if (nicknameExists) {
     return res.status(400).json({ message: "Nickname already taken in this room" });
   }
+  const playerId = `player-${room.players.length + 1}`;
 
-  room.players.push({ nickname });
+  room.players.push({
+    id: playerId,
+    nickname,
+    score: 0
+  });
+
   return res.status(200).json({ message: "Joined room successfully", room: { ...room } });
 };
 
@@ -86,7 +94,13 @@ exports.autoJoinRoom = (req, res) => {
   }
 
   const nickname = assignRandomName(room);
-  room.players.push({ nickname });
+  const playerId = `player-${room.players.length + 1}`;
+
+  room.players.push({
+    id: playerId,
+    nickname,
+    score: 0
+  });
   return res.status(200).json({ message: "Auto-joined with random name", nickname, room: { ...room } });
 };
 
@@ -138,4 +152,30 @@ exports.leaveRoom = (req, res) => {
   }
 
   return res.status(200).json({ message: "Left room", room: { ...room } });
+};
+
+
+exports.setIO = (io) => {
+  ioInstance = io;
+};
+
+exports.startGame = (req, res) => {
+  const { roomId } = req.params;
+  const { nickname } = req.body;
+  const room = rooms[roomId];
+  console.log("hello");
+  if (!room) return res.status(404).json({ message: "Room not found" });
+  if (room.owner !== nickname) {
+    return res.status(403).json({ message: "Only the owner can start the game" });
+  }
+  if (room.started) {
+    return res.status(400).json({ message: "Game already started" });
+  }
+
+  room.started = true;
+  ioInstance.to(roomId).emit("gameStarted", { roomId });
+  console.log("hello 2")
+  runGameLoop(ioInstance, roomId); // 👈 start loop from REST too
+
+  return res.status(200).json({ message: "Game started", room: { ...room } });
 };

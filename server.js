@@ -3,11 +3,13 @@ const express = require("express");
 const http = require("http");
 const cors = require("cors");
 const { Server } = require("socket.io");
-const roomRoutes = require("./routes/roomRoutes");
-const rooms = require("./data/rooms"); // 👈 so we can fetch updated room state
-
+const roomRoutes = require("./roomRoutes");
+const rooms = require("./rooms"); // 👈 so we can fetch updated room state
+const { runGameLoop } = require("./gameLoop");
 const app = express();
-const server = http.createServer(app); // ⬅️ Needed for Socket.IO
+const server = http.createServer(app);
+const { setIO } = require("./roomController");
+
 
 // Middleware
 app.use(cors());
@@ -28,6 +30,7 @@ const io = new Server(server, {
     methods: ["GET", "POST"],
   },
 });
+setIO(io);
 
 io.on("connection", (socket) => {
   console.log("✅ New client connected:", socket.id);
@@ -58,14 +61,14 @@ io.on("connection", (socket) => {
   });
 
   socket.on("startGame", ({ roomId }) => {
-    // ✅ mark room as started in your rooms data
     if (rooms[roomId]) {
-      rooms[roomId].isStarted = true;
+      rooms[roomId].started = true;
       io.to(roomId).emit("gameStarted", { roomId });
       console.log(`🎮 Game started in room ${roomId}`);
+
+      runGameLoop(io, roomId); // 👈 start loop here
     }
   });
-
 
   // Handle disconnection
   socket.on("disconnect", () => {

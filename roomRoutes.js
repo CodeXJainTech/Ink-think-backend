@@ -8,7 +8,7 @@ const {
   updateRoom,
   startGame,
   leaveRoom,
-} = require("../controllers/roomController");
+} = require("./roomController");
 
 // Create a room
 router.post("/createroom", createRoom);
