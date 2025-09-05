@@ -1,5 +1,6 @@
+// roomController.js
 const rooms = require("./rooms");
-let ioInstance;
+let ioInstance = null;
 const { runGameLoop } = require("./gameLoop");
 
 // Utility to generate random 6-character room ID
@@ -24,10 +25,9 @@ const assignRandomName = (room) => {
   return nickname;
 };
 
-// -------- Controllers --------
+// Create room
 exports.createRoom = (req, res) => {
   const { owner, maxPlayers, wordType, time, totalRounds } = req.body;
-
   if (!owner || !maxPlayers || !wordType || !time || !totalRounds) {
     return res.status(400).json({ message: "All fields are required." });
   }
@@ -41,9 +41,11 @@ exports.createRoom = (req, res) => {
     wordType,
     time: Number(time),
     totalRounds: Number(totalRounds),
-    players: [{ nickname: owner.trim() }],
+    players: [{ id: "player-1", nickname: owner.trim(), score: 0, canChat: true, socketId: undefined }],
     currentRound: 1,
     started: false,
+    currentWord: "",
+    operations: [],
   };
 
   return res.status(201).json({ message: "Room created", roomId });
@@ -58,27 +60,24 @@ exports.getRoom = (req, res) => {
 
 exports.joinRoom = (req, res) => {
   const { roomId, nickname } = req.body;
-  if (!roomId || !nickname) {
-    return res.status(400).json({ message: "roomId and nickname required" });
-  }
+  if (!roomId || !nickname) return res.status(400).json({ message: "roomId and nickname required" });
 
   const room = rooms[roomId];
   if (!room) return res.status(404).json({ message: "Room not found" });
   if (room.started) return res.status(400).json({ message: "Game already started" });
-  if (room.players.length >= room.maxPlayers) {
-    return res.status(400).json({ message: "Room is full" });
-  }
+  if (room.players.length >= room.maxPlayers) return res.status(400).json({ message: "Room is full" });
 
   const nicknameExists = room.players.some((p) => p.nickname === nickname);
-  if (nicknameExists) {
-    return res.status(400).json({ message: "Nickname already taken in this room" });
-  }
+  if (nicknameExists) return res.status(400).json({ message: "Nickname already taken in this room" });
+
   const playerId = `player-${room.players.length + 1}`;
 
   room.players.push({
     id: playerId,
     nickname,
-    score: 0
+    score: 0,
+    canChat: true,
+    socketId: undefined,
   });
 
   return res.status(200).json({ message: "Joined room successfully", room: { ...room } });
@@ -89,9 +88,7 @@ exports.autoJoinRoom = (req, res) => {
   const room = rooms[roomId];
   if (!room) return res.status(404).json({ message: "Room not found" });
   if (room.started) return res.status(400).json({ message: "Game already started" });
-  if (room.players.length >= room.maxPlayers) {
-    return res.status(400).json({ message: "Room is full" });
-  }
+  if (room.players.length >= room.maxPlayers) return res.status(400).json({ message: "Room is full" });
 
   const nickname = assignRandomName(room);
   const playerId = `player-${room.players.length + 1}`;
@@ -99,7 +96,9 @@ exports.autoJoinRoom = (req, res) => {
   room.players.push({
     id: playerId,
     nickname,
-    score: 0
+    score: 0,
+    canChat: true,
+    socketId: undefined,
   });
   return res.status(200).json({ message: "Auto-joined with random name", nickname, room: { ...room } });
 };
@@ -111,8 +110,6 @@ exports.updateRoom = (req, res) => {
   const room = rooms[roomId];
   if (!room) return res.status(404).json({ message: "Room not found" });
 
-  // You can add owner-auth here if needed: e.g., req.body.nickname must equal room.owner
-
   if (maxPlayers !== undefined) room.maxPlayers = Number(maxPlayers);
   if (wordType !== undefined) room.wordType = wordType;
   if (time !== undefined) room.time = Number(time);
@@ -123,16 +120,19 @@ exports.updateRoom = (req, res) => {
 
 exports.startGame = (req, res) => {
   const { roomId } = req.params;
-  const { nickname } = req.body; // simple ownership check
+  const { nickname } = req.body;
   const room = rooms[roomId];
+
   if (!room) return res.status(404).json({ message: "Room not found" });
-  if (room.owner !== nickname) {
-    return res.status(403).json({ message: "Only the owner can start the game" });
-  }
-  if (room.started) {
-    return res.status(400).json({ message: "Game already started" });
-  }
+  if (room.owner !== nickname) return res.status(403).json({ message: "Only the owner can start the game" });
+  if (room.started) return res.status(400).json({ message: "Game already started" });
+
   room.started = true;
+  if (ioInstance) {
+    ioInstance.to(roomId).emit("gameStarted", { roomId });
+    runGameLoop(ioInstance, roomId);
+  }
+
   return res.status(200).json({ message: "Game started", room: { ...room } });
 };
 
@@ -142,10 +142,8 @@ exports.leaveRoom = (req, res) => {
   const room = rooms[roomId];
   if (!room) return res.status(404).json({ message: "Room not found" });
 
-  // remove player
   room.players = room.players.filter((p) => p.nickname !== nickname);
 
-  // if owner leaves or no players remain => delete room
   if (room.owner === nickname || room.players.length === 0) {
     delete rooms[roomId];
     return res.status(200).json({ message: "Room closed" });
@@ -154,28 +152,6 @@ exports.leaveRoom = (req, res) => {
   return res.status(200).json({ message: "Left room", room: { ...room } });
 };
 
-
 exports.setIO = (io) => {
   ioInstance = io;
-};
-
-exports.startGame = (req, res) => {
-  const { roomId } = req.params;
-  const { nickname } = req.body;
-  const room = rooms[roomId];
-  console.log("hello");
-  if (!room) return res.status(404).json({ message: "Room not found" });
-  if (room.owner !== nickname) {
-    return res.status(403).json({ message: "Only the owner can start the game" });
-  }
-  if (room.started) {
-    return res.status(400).json({ message: "Game already started" });
-  }
-
-  room.started = true;
-  ioInstance.to(roomId).emit("gameStarted", { roomId });
-  console.log("hello 2")
-  runGameLoop(ioInstance, roomId); // 👈 start loop from REST too
-
-  return res.status(200).json({ message: "Game started", room: { ...room } });
 };

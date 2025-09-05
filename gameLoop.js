@@ -1,49 +1,113 @@
 // gameLoop.js
 const rooms = require("./rooms");
+const { getRandomWord } = require("./wordBank");
 
 function runGameLoop(io, roomId) {
   const room = rooms[roomId];
   if (!room) return;
-  console.log("hello3");
 
   let round = 1;
-  const totalRounds = room.totalRounds;
-  const players = room.players; // keep full objects, not just nicknames
+  let turnIndex = 0;
+  const totalRounds = room.totalRounds || 1;
+  const players = room.players || [];
+  let timeLeft;
+  let timer;
+  let allGuessed = 1;
 
-  const startRound = () => {
+  const startTurn = () => {
     if (round > totalRounds) {
-      io.to(roomId).emit("gameOver");
+      const finalRanking = [...room.players].sort((a, b) => b.score - a.score);
+      io.to(roomId).emit("gameOver", { ranking: finalRanking });
       room.started = false;
       return;
     }
 
-    const drawerIndex = (round - 1) % players.length;
-    const drawerPlayer = players[drawerIndex]; // full player object
+    // reset
+    room.operations = [];
+    room.players.forEach((p) => (p.canChat = true));
+    room.currentRound = round;
+
+    const drawerPlayer = players[turnIndex];
     const drawerNickname = drawerPlayer.nickname;
 
-    // 👉 Pick a word for this round
-    const chosenWord = "apple"; // TODO: replace with random word picker
+    const chosenWord = getRandomWord(room.wordType || "Random");
+    room.currentWord = chosenWord;
 
-    // Broadcast to everyone who is the drawer
-    io.to(roomId).emit("roundStart", { round, drawer: drawerNickname });
+    // emit turnStart
+    io.to(roomId).emit("turnStart", { round, drawer: drawerNickname });
 
-    // Send the actual word ONLY to the drawer’s socket
-    io.to(drawerPlayer.id).emit("word", { word: chosenWord });
+    // send word only to drawer
+    if (drawerPlayer.socketId) {
+      io.to(drawerPlayer.socketId).emit("word", { word: chosenWord });
+      io.to(drawerPlayer.socketId).emit("chatDisabled");
+      drawerPlayer.canChat = false;
+    }
 
-    // Timer
-    let timeLeft = room.time; // e.g. 60 seconds
-    const timer = setInterval(() => {
+    io.to(roomId).emit("roomUpdated", room);
+
+    // timer
+    timeLeft = room.time || 60;
+    io.to(roomId).emit("timerUpdate", { timeLeft });
+
+    timer = setInterval(() => {
       timeLeft--;
       io.to(roomId).emit("timerUpdate", { timeLeft });
-      console.log(timeLeft);
+
       if (timeLeft <= 0) {
         clearInterval(timer);
-        round++;
-        startRound();
+        nextTurn();
       }
     }, 1000);
   };
 
+  const startRound = () => {
+    if (round > totalRounds) return;
+    io.to(roomId).emit("roundStart", { round });
+    // wait 3s before first turn of this round
+    setTimeout(() => {
+      startTurn();
+    }, 3000);
+  };
+
+  const nextTurn = () => {
+    turnIndex++;
+    allGuessed = 1;
+    if (turnIndex >= players.length) {
+      turnIndex = 0;
+      round++;
+      if (round > totalRounds) {
+        const finalRanking = [...room.players].sort((a, b) => b.score - a.score);
+        io.to(roomId).emit("gameOver", { ranking: finalRanking });
+        room.started = false;
+        return;
+      }
+      // new round
+      startRound();
+    } else {
+      // next player turn after short delay
+      setTimeout(() => {
+        startTurn();
+      }, 3000);
+    }
+  };
+
+  // correct guess scoring
+  room.handleCorrectGuess = (nickname) => {
+    const player = players.find((p) => p.nickname === nickname);
+    if (!player || !room.currentWord) return;
+
+    const earned = timeLeft * 5;
+    player.score = (player.score || 0) + earned;
+    player.canChat = false;
+    allGuessed++;
+
+    if(allGuessed === room.players.length) {
+      clearInterval(timer);
+      nextTurn();
+    }
+  };
+
+  // start first round
   startRound();
 }
 
