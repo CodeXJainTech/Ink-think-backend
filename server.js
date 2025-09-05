@@ -11,7 +11,12 @@ const { setIO } = require("./roomController");
 const app = express();
 const server = http.createServer(app);
 
-app.use(cors());
+app.use(
+  cors({
+    origin: "https://ink-think.vercel.app",
+    methods: ["GET", "POST"],
+  })
+);
 app.use(express.json());
 app.use("/", roomRoutes);
 
@@ -21,7 +26,7 @@ app.get("/", (req, res) => {
 
 const io = new Server(server, {
   cors: {
-    origin: "*",
+    origin: "https://ink-think.vercel.app",
     methods: ["GET", "POST"],
   },
 });
