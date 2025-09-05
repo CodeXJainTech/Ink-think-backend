@@ -9,5 +9,18 @@
     "express": "^4.18.2",
     "cors": "^2.8.5",
     "socket.io": "^4.7.0"
-  }
+  },
+  "description": "",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CodeXJainTech/Ink-think-backend.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/CodeXJainTech/Ink-think-backend/issues"
+  },
+  "homepage": "https://github.com/CodeXJainTech/Ink-think-backend#readme"
 }
