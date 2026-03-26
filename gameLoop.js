@@ -9,105 +9,139 @@ function runGameLoop(io, roomId) {
   let round = 1;
   let turnIndex = 0;
   const totalRounds = room.totalRounds || 1;
-  const players = room.players || [];
   let timeLeft;
   let timer;
-  let allGuessed = 1;
+  let turnActive = false;
+
+  const usedWords = new Set();
+
+  const endGame = () => {
+    clearInterval(timer);
+    turnActive = false;
+    room.handleCorrectGuess = null;
+    room.currentDrawerSocketId = null;
+    room.currentWord = "";
+    room.started = false;
+    const finalRanking = [...room.players].sort((a, b) => b.score - a.score);
+    io.to(roomId).emit("gameOver", { ranking: finalRanking });
+  };
+
+  // BUG FIX: always read room.players live, not a stale snapshot
+  const getPlayers = () => room.players || [];
 
   const startTurn = () => {
-    if (round > totalRounds) {
-      const finalRanking = [...room.players].sort((a, b) => b.score - a.score);
-      io.to(roomId).emit("gameOver", { ranking: finalRanking });
-      room.started = false;
+    const players = getPlayers();
+    if (players.length === 0 || round > totalRounds) {
+      endGame();
       return;
     }
 
-    // reset
+    // Wrap turn index if players left
+    if (turnIndex >= players.length) turnIndex = 0;
+
+    clearInterval(timer);
     room.operations = [];
     room.players.forEach((p) => (p.canChat = true));
     room.currentRound = round;
+    turnActive = true;
 
     const drawerPlayer = players[turnIndex];
-    const drawerNickname = drawerPlayer.nickname;
-
-    const chosenWord = getRandomWord(room.wordType || "Random");
+    const chosenWord = getRandomWord(room.wordType || "Random", usedWords);
     room.currentWord = chosenWord;
+    room.currentDrawerSocketId = drawerPlayer.socketId || null;
 
-    // emit turnStart
-    io.to(roomId).emit("turnStart", { round, drawer: drawerNickname });
+    // Emit turnStart — frontend shows "X is drawing" overlay for 3s, THEN reveals canvas
+    io.to(roomId).emit("turnStart", {
+      round,
+      totalRounds,
+      drawer: drawerPlayer.nickname,
+      wordLength: chosenWord.length, // give guessers the word length as hint
+    });
 
-    // send word only to drawer
+    // Send word only to drawer
     if (drawerPlayer.socketId) {
-      io.to(drawerPlayer.socketId).emit("word", { word: chosenWord });
-      io.to(drawerPlayer.socketId).emit("chatDisabled");
+      io.to(drawerPlayer.socketId).emit("yourWord", { word: chosenWord });
       drawerPlayer.canChat = false;
     }
 
     io.to(roomId).emit("roomUpdated", room);
 
-    // timer
-    timeLeft = room.time || 60;
-    io.to(roomId).emit("timerUpdate", { timeLeft });
-
-    timer = setInterval(() => {
-      timeLeft--;
+    // BUG FIX: wait 3s (matching frontend overlay) before starting timer
+    setTimeout(() => {
+      if (!turnActive) return; // turn was skipped (e.g. everyone guessed during transition)
+      timeLeft = room.time || 60;
       io.to(roomId).emit("timerUpdate", { timeLeft });
 
-      if (timeLeft <= 0) {
-        clearInterval(timer);
-        nextTurn();
-      }
-    }, 1000);
-  };
-
-  const startRound = () => {
-    if (round > totalRounds) return;
-    io.to(roomId).emit("roundStart", { round });
-    // wait 3s before first turn of this round
-    setTimeout(() => {
-      startTurn();
+      timer = setInterval(() => {
+        timeLeft--;
+        io.to(roomId).emit("timerUpdate", { timeLeft });
+        if (timeLeft <= 0) {
+          clearInterval(timer);
+          revealAndNext();
+        }
+      }, 1000);
     }, 3000);
   };
 
+  // BUG FIX: reveal word to everyone before moving on
+  const revealAndNext = () => {
+    turnActive = false;
+    const revealedWord = room.currentWord;
+    io.to(roomId).emit("wordReveal", { word: revealedWord });
+    setTimeout(() => nextTurn(), 2000);
+  };
+
+  const startRound = () => {
+    if (round > totalRounds) {
+      endGame();
+      return;
+    }
+    io.to(roomId).emit("roundStart", { round, totalRounds });
+    // 3s pause showing "Round X" before first turn of this round
+    setTimeout(() => startTurn(), 3000);
+  };
+
   const nextTurn = () => {
+    clearInterval(timer);
+    room.currentDrawerSocketId = null;
     turnIndex++;
-    allGuessed = 1;
+
+    const players = getPlayers();
     if (turnIndex >= players.length) {
       turnIndex = 0;
       round++;
       if (round > totalRounds) {
-        const finalRanking = [...room.players].sort((a, b) => b.score - a.score);
-        io.to(roomId).emit("gameOver", { ranking: finalRanking });
-        room.started = false;
+        endGame();
         return;
       }
-      // new round
       startRound();
     } else {
-      // next player turn after short delay
-      setTimeout(() => {
-        startTurn();
-      }, 3000);
+      startTurn();
     }
   };
 
-  // correct guess scoring
+  // BUG FIX: allGuessed recalculated dynamically from live player list
   room.handleCorrectGuess = (nickname) => {
-    const player = players.find((p) => p.nickname === nickname);
+    if (!turnActive) return;
+    const player = getPlayers().find((p) => p.nickname === nickname);
     if (!player || !room.currentWord) return;
 
-    const earned = timeLeft * 5;
+    const earned = Math.max(timeLeft || 0, 0) * 5;
     player.score = (player.score || 0) + earned;
     player.canChat = false;
-    allGuessed++;
 
-    if(allGuessed === room.players.length) {
+    // Check if ALL non-drawer players have guessed
+    const nonDrawers = getPlayers().filter(
+      (p) => p.socketId !== room.currentDrawerSocketId,
+    );
+    const allGuessed = nonDrawers.every((p) => p.canChat === false);
+
+    if (allGuessed) {
       clearInterval(timer);
-      nextTurn();
+      revealAndNext();
     }
   };
 
-  // start first round
   startRound();
 }
 

@@ -7,27 +7,32 @@ const roomRoutes = require("./roomRoutes");
 const rooms = require("./rooms");
 const { runGameLoop } = require("./gameLoop");
 const { setIO } = require("./roomController");
+const dotenv = require("dotenv");
+dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
 
-app.use(cors({
-  origin: "https://ink-think.vercel.app",
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-  credentials: true
-}));
+const ALLOWED_ORIGIN = process.env.FRONTEND_URL;
 
-app.use(express.json());
+app.use(
+  cors({
+    origin: ALLOWED_ORIGIN,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true,
+  }),
+);
+
+app.use(express.json({ limit: "10kb" }));
 app.use("/", roomRoutes);
 
-app.get("/", (req, res) => {
-  res.send("Scribble Game Backend Running!");
-});
+app.get("/health", (req, res) => res.json({ status: "ok" }));
+app.get("/", (req, res) => res.send("Scribble Game Backend Running!"));
 
 const io = new Server(server, {
   cors: {
-    origin: "https://ink-think.vercel.app",
+    origin: ALLOWED_ORIGIN,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     credentials: true,
@@ -36,76 +41,88 @@ const io = new Server(server, {
 
 setIO(io);
 
-// central socket handlers
+const MAX_NICKNAME_LEN = 24;
+const MAX_GUESS_LEN = 120;
+
+const sanitize = (str) =>
+  typeof str === "string" ? str.trim().slice(0, MAX_GUESS_LEN) : "";
+const sanitizeNick = (str) =>
+  typeof str === "string" ? str.trim().slice(0, MAX_NICKNAME_LEN) : "";
+
 io.on("connection", (socket) => {
   console.log("✅ New client connected:", socket.id);
 
-  // Player joins a room
-  // client: socket.emit("joinRoom", { roomId, nickname })
   socket.on("joinRoom", ({ roomId, nickname }) => {
-    if (!roomId || !nickname) return;
+    const nick = sanitizeNick(nickname);
+    if (!roomId || !nick) return;
     socket.join(roomId);
-    console.log(`👤 ${nickname} joined room ${roomId} (${socket.id})`);
 
     const room = rooms[roomId];
     if (room) {
-      let player = room.players.find((p) => p.nickname === nickname);
+      let player = room.players.find((p) => p.nickname === nick);
       if (player) {
         player.socketId = socket.id;
         player.canChat = player.canChat ?? true;
       } else {
         const playerId = `player-${room.players.length + 1}`;
-        player = { id: playerId, nickname, score: 0, canChat: true, socketId: socket.id };
+        player = {
+          id: playerId,
+          nickname: nick,
+          score: 0,
+          canChat: true,
+          socketId: socket.id,
+        };
         room.players.push(player);
       }
-
       io.to(roomId).emit("roomUpdated", room);
     }
 
-    io.to(roomId).emit("userJoined", { nickname, id: socket.id });
+    io.to(roomId).emit("userJoined", { nickname: nick, id: socket.id });
   });
 
-  // Player leaves
   socket.on("leaveRoom", ({ roomId, nickname }) => {
-    if (!roomId || !nickname) return;
+    const nick = sanitizeNick(nickname);
+    if (!roomId || !nick) return;
     socket.leave(roomId);
-    console.log(`🚪 ${nickname} left room ${roomId}`);
 
     const room = rooms[roomId];
     if (room) {
-      const player = room.players.find((p) => p.nickname === nickname);
-      if (player) {
-        delete player.socketId;
-      }
+      const player = room.players.find((p) => p.nickname === nick);
+      if (player) delete player.socketId;
       io.to(roomId).emit("roomUpdated", room);
     }
-    io.to(roomId).emit("userLeft", nickname);
+    io.to(roomId).emit("userLeft", nick);
   });
 
-  // A client can emit drawOp: { roomId, op }
+  // FIX: Only the current drawer can emit draw ops
   socket.on("drawOp", ({ roomId, op }) => {
     if (!roomId || !op) return;
     const room = rooms[roomId];
     if (!room) return;
-    // store op (so new spectators can replay)
+
+    if (!room.currentDrawerSocketId || room.currentDrawerSocketId !== socket.id)
+      return;
+
     room.operations = room.operations || [];
     room.operations.push(op);
-    // broadcast op to all in room (including drawer so live sync)
     io.to(roomId).emit("drawOp", { op });
   });
 
-  // Client asks to fetch initial drawing operations
   socket.on("fetchDrawing", ({ roomId }) => {
     const room = rooms[roomId];
     if (!room) return;
     socket.emit("initDrawing", { operations: room.operations || [] });
   });
 
-  // Player guesses
+  // FIX: No double scoring, drawer cannot guess, input sanitized
   socket.on("sendGuess", ({ roomId, nickname, text }) => {
+    const nick = sanitizeNick(nickname);
+    const guessText = sanitize(text);
+
     const room = rooms[roomId];
-    if (!room) return;
-    const player = room.players.find((p) => p.nickname === nickname);
+    if (!room || !nick || !guessText) return;
+
+    const player = room.players.find((p) => p.nickname === nick);
     if (!player) return;
 
     if (player.canChat === false) {
@@ -113,43 +130,52 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const normalized = (text || "").trim().toLowerCase();
+    // Drawer cannot guess
+    if (room.currentDrawerSocketId === socket.id) {
+      socket.emit("chatDisabled");
+      return;
+    }
+
+    const normalized = guessText.toLowerCase();
     const current = (room.currentWord || "").toLowerCase();
     const correct = normalized && current && normalized === current;
 
     if (correct) {
       player.canChat = false;
-      const scoreEarned = (room.time || 60) > 0 ? room.time * 5 : 0;
-      player.score += scoreEarned;
-
-      io.to(roomId).emit("correctGuess", { user: nickname, score: player.score });
-      io.to(roomId).emit("roomUpdated", room);
       io.to(player.socketId || socket.id).emit("chatDisabled");
+      io.to(roomId).emit("correctGuess", { user: nick });
 
-      // trigger round check
+      // Scoring handled only in gameLoop
       if (room.handleCorrectGuess) {
-        room.handleCorrectGuess(nickname);
+        room.handleCorrectGuess(nick);
       }
+
+      io.to(roomId).emit("roomUpdated", room);
     } else {
-      io.to(roomId).emit("newGuess", { user: nickname, text });
+      io.to(roomId).emit("newGuess", { user: nick, text: guessText });
     }
   });
 
-
-  // startGame via socket (optional)
+  // FIX: Socket startGame now verifies owner via socketId
   socket.on("startGame", ({ roomId }) => {
     const room = rooms[roomId];
-    if (!room) return;
+    if (!room || room.started) return;
+
+    const player = room.players.find((p) => p.socketId === socket.id);
+    if (!player || room.owner !== player.nickname) {
+      socket.emit("error", {
+        message: "Only the room owner can start the game.",
+      });
+      return;
+    }
+
     room.started = true;
     io.to(roomId).emit("gameStarted", { roomId });
-    setTimeout(() => {console.log("Game is about to start MF!")}, 3000);
     runGameLoop(io, roomId);
   });
 
-  // disconnect cleanup
   socket.on("disconnect", () => {
     console.log("❌ Client disconnected:", socket.id);
-    // clear socketId from any player that had it
     for (const rid of Object.keys(rooms)) {
       const room = rooms[rid];
       const player = (room.players || []).find((p) => p.socketId === socket.id);
